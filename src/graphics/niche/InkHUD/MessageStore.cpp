@@ -12,7 +12,7 @@ using namespace NicheGraphics;
 constexpr uint8_t MAX_MESSAGES_SAVED = 10;
 constexpr uint32_t MAX_MESSAGE_SIZE = 250;
 
-InkHUD::MessageStore::MessageStore(std::string label)
+InkHUD::MessageStore::MessageStore(const std::string &label)
 {
     filename = "";
     filename += "/NicheGraphics";
@@ -22,6 +22,8 @@ InkHUD::MessageStore::MessageStore(std::string label)
 }
 
 // Write the contents of the MessageStore::messages object to flash
+// Takes the firmware's SPI lock during FS operations. Implemented for consistency, but only relevant when using SD card.
+// Need to lock and unlock around specific FS methods, as the SafeFile class takes the lock for itself internally
 void InkHUD::MessageStore::saveToFlash()
 {
     assert(!filename.empty());
@@ -29,7 +31,9 @@ void InkHUD::MessageStore::saveToFlash()
 #ifdef FSCom
     // Make the directory, if doesn't already exist
     // This is the same directory accessed by NicheGraphics::FlashData
+    spiLock->lock();
     FSCom.mkdir("/NicheGraphics");
+    spiLock->unlock();
 
     // Open or create the file
     // No "full atomic": don't save then rename
@@ -37,19 +41,26 @@ void InkHUD::MessageStore::saveToFlash()
 
     LOG_INFO("Saving messages in %s", filename.c_str());
 
+    // Take firmware's SPI Lock while writing
+    spiLock->lock();
+
     // 1st byte: how many messages will be written to store
     f.write(messages.size());
 
     // For each message
     for (uint8_t i = 0; i < messages.size() && i < MAX_MESSAGES_SAVED; i++) {
         Message &m = messages.at(i);
-        f.write((uint8_t *)&m.timestamp, sizeof(m.timestamp));                    // Write timestamp. 4 bytes
-        f.write((uint8_t *)&m.sender, sizeof(m.sender));                          // Write sender NodeId. 4 Bytes
-        f.write((uint8_t *)&m.channelIndex, sizeof(m.channelIndex));              // Write channel index. 1 Byte
-        f.write((uint8_t *)m.text.c_str(), min(MAX_MESSAGE_SIZE, m.text.size())); // Write message text. Variable length
-        f.write('\0');                                                            // Append null term
-        LOG_DEBUG("Wrote message %u, length %u, text \"%s\"", (uint32_t)i, min(MAX_MESSAGE_SIZE, m.text.size()), m.text.c_str());
+        f.write(reinterpret_cast<const uint8_t *>(&m.timestamp), sizeof(m.timestamp));       // Write timestamp. 4 bytes
+        f.write(reinterpret_cast<const uint8_t *>(&m.sender), sizeof(m.sender));             // Write sender NodeId. 4 Bytes
+        f.write(reinterpret_cast<const uint8_t *>(&m.channelIndex), sizeof(m.channelIndex)); // Write channel index. 1 Byte
+        f.write(reinterpret_cast<const uint8_t *>(m.text.c_str()), min(MAX_MESSAGE_SIZE, m.text.size())); // Write message text
+        f.write('\0');                                                                                    // Append null term
+        LOG_DEBUG("Wrote message %u, length %u, text \"%s\"", static_cast<uint32_t>(i), min(MAX_MESSAGE_SIZE, m.text.size()),
+                  m.text.c_str());
     }
+
+    // Release firmware's SPI lock, because SafeFile::close needs it
+    spiLock->unlock();
 
     bool writeSucceeded = f.close();
 
@@ -63,12 +74,16 @@ void InkHUD::MessageStore::saveToFlash()
 
 // Attempt to load the previous contents of the MessageStore:message deque from flash.
 // Filename is controlled by the "label" parameter
+// Takes the firmware's SPI lock during FS operations. Implemented for consistency, but only relevant when using SD card.
 void InkHUD::MessageStore::loadFromFlash()
 {
     // Hopefully redundant. Initial intention is to only load / save once per boot.
     messages.clear();
 
 #ifdef FSCom
+
+    // Take the firmware's SPI Lock, in case filesystem is on SD card
+    concurrency::LockGuard guard(spiLock);
 
     // Check that the file *does* actually exist
     if (!FSCom.exists(filename.c_str())) {
@@ -97,17 +112,17 @@ void InkHUD::MessageStore::loadFromFlash()
 
         // First byte: how many messages are in the flash store
         uint8_t flashMessageCount = 0;
-        f.readBytes((char *)&flashMessageCount, 1);
-        LOG_DEBUG("Messages available: %u", (uint32_t)flashMessageCount);
+        f.readBytes(reinterpret_cast<char *>(&flashMessageCount), 1);
+        LOG_DEBUG("Messages available: %u", static_cast<uint32_t>(flashMessageCount));
 
         // For each message
         for (uint8_t i = 0; i < flashMessageCount && i < MAX_MESSAGES_SAVED; i++) {
             Message m;
 
             // Read meta data (fixed width)
-            f.readBytes((char *)&m.timestamp, sizeof(m.timestamp));
-            f.readBytes((char *)&m.sender, sizeof(m.sender));
-            f.readBytes((char *)&m.channelIndex, sizeof(m.channelIndex));
+            f.readBytes(reinterpret_cast<char *>(&m.timestamp), sizeof(m.timestamp));
+            f.readBytes(reinterpret_cast<char *>(&m.sender), sizeof(m.sender));
+            f.readBytes(reinterpret_cast<char *>(&m.channelIndex), sizeof(m.channelIndex));
 
             // Read characters until we find a null term
             char c;
@@ -122,7 +137,8 @@ void InkHUD::MessageStore::loadFromFlash()
             // Store in RAM
             messages.push_back(m);
 
-            LOG_DEBUG("#%u, timestamp=%u, sender(num)=%u, text=\"%s\"", (uint32_t)i, m.timestamp, m.sender, m.text.c_str());
+            LOG_DEBUG("#%u, timestamp=%u, sender(num)=%u, text=\"%s\"", static_cast<uint32_t>(i), m.timestamp, m.sender,
+                      m.text.c_str());
         }
 
         f.close();

@@ -59,7 +59,7 @@ void TwoButton::stop()
 }
 
 // Attempt to resolve a GPIO pin for the user button, honoring userPrefs.jsonc and device settings
-// This helper method isn't used by the TweButton class itself, it could be moved elsewhere.
+// This helper method isn't used by the TwoButton class itself, it could be moved elsewhere.
 // Intention is to pass this value to TwoButton::setWiring in the setupNicheGraphics method.
 uint8_t TwoButton::getUserButtonPin()
 {
@@ -181,7 +181,7 @@ void TwoButton::isrSecondary()
 void TwoButton::startThread()
 {
     if (!OSThread::enabled) {
-        OSThread::setInterval(50);
+        OSThread::setInterval(10);
         OSThread::enabled = true;
     }
 }
